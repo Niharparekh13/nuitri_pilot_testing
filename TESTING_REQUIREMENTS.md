@@ -83,7 +83,24 @@ Default behavior:
 - Frontend: unit/widget tests + integration tests on Android emulator (if folder exists)
 - Live AI tests: not included unless enabled
 
-### Always run backend + emulator together (mobile app workflow)
+### One-command app run (backend + emulator)
+
+From testing repo:
+
+```powershell
+cd C:\Users\nihar\Desktop\nuitripilot\nuitri_pilot_testing
+python run_app.py
+```
+
+Useful options:
+
+```powershell
+python run_app.py --backend-only
+python run_app.py --device-id emulator-5554 --api-base-url http://10.0.2.2:8000
+python run_app.py --no-preload-images
+```
+
+### Manual run backend + emulator together (mobile app workflow)
 
 Use two terminals so backend stays running while app is launched on emulator.
 
@@ -186,6 +203,9 @@ python -m pytest -q tests\api\test_auth_required.py
 python -m pytest -q tests\api\test_root_contract.py
 python -m pytest -q tests\unit\test_ai_golden_mocked.py
 python -m pytest -q tests\unit\test_ai_service_mocked.py
+python -m pytest -q tests\unit\test_ai_audit_truth.py
+python -m pytest -q tests\unit\test_agent_non_food_guard.py
+python -m pytest -q tests\unit\test_suggestion_service_profile_adjustments.py
 python -m pytest -q tests\unit\test_token.py
 python -m pytest -q tests\integration\test_mongo_real.py
 python -m pytest -q tests\live\test_ai_live.py
@@ -279,3 +299,16 @@ Before pushing your branch:
 4. Confirm `.env` and secrets are not committed.
 5. Confirm generated logs/reports are ignored by git policy (if required by your repo workflow).
 6. Include test evidence (report paths/screenshots) in PR description.
+
+## 12) Expected AI Behavior Rules
+
+These behaviors are now enforced in backend logic:
+
+1. Non-food/scenic images:
+   - Must return `code=1`, `mark=0`, and request a food/label image.
+2. Allergy risk in detected/mentioned ingredients:
+   - Score is capped to low range and output is marked high-risk (`level=3`).
+3. Overweight/obesity chronic with calorie-dense cues (burger/pizza/fried etc.):
+   - Score is capped to a safer range with explicit portion guidance.
+4. Strict audit mode can still fail outputs with unsupported factual claims:
+   - review `FACT` issues in AI batch report before release.

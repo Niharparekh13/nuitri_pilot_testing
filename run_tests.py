@@ -30,7 +30,7 @@ LOG_FILE = LOG_DIR / f"test_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 # Track pass/fail for summary
 RESULTS = {
     "backend": "NOT RUN",
-    "backend_ai_batch_100": "NOT RUN",
+    "backend_ai_batch": "NOT RUN",
     "frontend_unit": "NOT RUN",
     "frontend_integration": "NOT RUN",
 }
@@ -45,6 +45,10 @@ def log(msg: str) -> None:
 
 def _env_truthy(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dedicated_ai_batch_requested() -> bool:
+    return _env_truthy("RUN_AI_BATCH_ALWAYS", "1") or _env_truthy("RUN_AI_BATCH_100", "0")
 
 
 def _try_get_git_commit(repo_dir: Path) -> str:
@@ -167,6 +171,13 @@ def _log_latest_ai_image_batch_summary() -> None:
     total_returned = metrics.get("total_returned", "unknown")
     success_rate = metrics.get("success_rate", None)
     success_rate_txt = f"{(float(success_rate) * 100):.2f}%" if isinstance(success_rate, (int, float)) else "unknown"
+    audit_passed_calls = metrics.get("audit_passed_calls", "unknown")
+    audit_failed_calls = metrics.get("audit_failed_calls", "unknown")
+    fact_issue_total = metrics.get("fact_issue_total", "unknown")
+    diagnostic_mode = metrics.get("diagnostic_mode", "unknown")
+    gate_failures = summary.get("gate_failures", [])
+    issue_counts = summary.get("audit_issue_counts", {})
+    next_actions = summary.get("next_actions", [])
 
     log("\nAI IMAGE BATCH SUMMARY (latest artifact)")
     log(f"Artifact: {latest}")
@@ -182,6 +193,25 @@ def _log_latest_ai_image_batch_summary() -> None:
     log(f"- Expected-failure calls: {expected_fail_calls}")
     log(f"- Total returned: {total_returned}")
     log(f"- Success rate: {success_rate_txt}")
+    log(f"- Audit passed calls: {audit_passed_calls}")
+    log(f"- Audit failed calls: {audit_failed_calls}")
+    log(f"- FACT issue total: {fact_issue_total}")
+    log(f"- Diagnostic mode: {diagnostic_mode}")
+
+    if isinstance(issue_counts, dict) and issue_counts:
+        log("- Audit issue counts:")
+        for k, v in sorted(issue_counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))):
+            log(f"  {k}: {v}")
+
+    if isinstance(gate_failures, list) and gate_failures:
+        log("- Gate failures (recorded):")
+        for g in gate_failures[:5]:
+            log(f"  {g}")
+
+    if isinstance(next_actions, list) and next_actions:
+        log("- Next actions:")
+        for a in next_actions[:5]:
+            log(f"  {a}")
 
     scored_samples = summary.get("scored_with_feedback_samples", [])
     unreadable_samples = summary.get("unreadable_feedback_samples", [])
@@ -276,6 +306,7 @@ def run_backend_tests() -> None:
     log("\nRUNNING BACKEND TESTS\n")
 
     env = build_backend_env()
+    run_batch_separately = _dedicated_ai_batch_requested()
 
     # ------------------------------
     # Corporate artifacts (JUnit + HTML + Coverage)
@@ -315,6 +346,19 @@ def run_backend_tests() -> None:
             log("Fix: Ensure .env has OPEN_AI_API_KEY (or OPENAI_API_KEY).")
             RESULTS["backend"] = "FAILED"
             sys.exit(2)
+        if run_batch_separately:
+            args += ["--ignore=tests/ai_eval/test_ai_batch_image_live.py"]
+            log(
+                "RUN_AI_BATCH_ALWAYS=1 or RUN_AI_BATCH_100=1 -> excluding "
+                "tests/ai_eval/test_ai_batch_image_live.py from main backend suite; "
+                "it will run in the dedicated AI batch step.\n"
+            )
+        if os.getenv("RUN_AI_REGRESSION") != "1":
+            args += ["--ignore=tests/live/test_ai_regression_live.py"]
+            log(
+                "RUN_AI_REGRESSION!=1 -> excluding tests/live/test_ai_regression_live.py "
+                "(set RUN_AI_REGRESSION=1 to include snapshot drift checks).\n"
+            )
         if os.getenv("RUN_AI_LEGACY_EVAL") != "1":
             args += ["--ignore=tests/ai_eval/test_ai_batch_live.py"]
             log(
@@ -339,26 +383,33 @@ def run_backend_tests() -> None:
     log(f"Backend reports: {report_dir}\n")
     if os.getenv("RUN_AI_LIVE") == "1":
         _log_latest_ai_image_batch_summary()
-        _auto_open_ai_reports_once()
+        if run_batch_separately:
+            log("Deferring report auto-open until dedicated AI batch step completes.\n")
+        else:
+            _auto_open_ai_reports_once()
 
 
-def run_backend_ai_batch_100_test() -> None:
+def run_backend_ai_batch_test() -> None:
     """
-    Runs the dedicated 100-case live AI image batch suite.
-    Enable with RUN_AI_BATCH_100=1.
+    Runs the dedicated live AI image batch suite and generates JSON/CSV/HTML reports.
+
+    Behavior:
+    - RUN_AI_BATCH_ALWAYS=1 (default): diagnostic batch on every run.
+    - RUN_AI_BATCH_100=1: strict 100-case mode.
     """
-    if os.getenv("RUN_AI_BATCH_100") != "1":
-        RESULTS["backend_ai_batch_100"] = "SKIPPED (RUN_AI_BATCH_100!=1)"
-        log("\nSkipping backend AI batch 100 test (set RUN_AI_BATCH_100=1 to enable).\n")
+    run_always = _env_truthy("RUN_AI_BATCH_ALWAYS", "1")
+    strict_100 = _env_truthy("RUN_AI_BATCH_100", "0")
+
+    if not run_always and not strict_100:
+        RESULTS["backend_ai_batch"] = "SKIPPED (RUN_AI_BATCH_ALWAYS!=1 and RUN_AI_BATCH_100!=1)"
+        log(
+            "\nSkipping dedicated AI image batch step "
+            "(set RUN_AI_BATCH_ALWAYS=1 or RUN_AI_BATCH_100=1).\n"
+        )
         return
 
-    # Avoid duplicate paid runs if full live backend suite is already enabled.
-    if os.getenv("RUN_AI_LIVE") == "1":
-        RESULTS["backend_ai_batch_100"] = "SKIPPED (already covered by RUN_AI_LIVE=1)"
-        log("\nSkipping dedicated AI batch 100 test (RUN_AI_LIVE=1 already includes it).\n")
-        return
-
-    log("\nRUNNING BACKEND AI IMAGE BATCH (100 LIVE CASES)\n")
+    mode = "STRICT_100" if strict_100 else "DIAGNOSTIC"
+    log(f"\nRUNNING BACKEND AI IMAGE BATCH ({mode})\n")
     env = build_backend_env()
     report_dir = BACKEND_DIR / "test_reports" / "ai_batch"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -366,18 +417,33 @@ def run_backend_ai_batch_100_test() -> None:
     if not env.get("OPENAI_API_KEY"):
         log("ERROR: OPENAI_API_KEY not set after reading backend .env.")
         log("Fix: Ensure .env has OPEN_AI_API_KEY (or OPENAI_API_KEY).")
-        RESULTS["backend_ai_batch_100"] = "FAILED"
+        RESULTS["backend_ai_batch"] = "FAILED"
         sys.exit(2)
 
-    # Keep this step explicit at 100 unless caller overrides AI_BATCH_N.
-    env.setdefault("AI_BATCH_N", "100")
-    # Image batch contract allows mark in 0..100; keep default gate aligned.
-    env.setdefault("AI_MIN_MARK", "0")
-    env.setdefault("AI_MIN_SUCCESS_RATE", "0.3")
+    if strict_100:
+        # Strict mode must force 100 cases regardless of prior shell env values.
+        env["AI_BATCH_N"] = "100"
+        env["AI_DIAGNOSTIC_MODE"] = "0"
+        env.setdefault("AI_MIN_MARK", "0")
+        env.setdefault("AI_MIN_SUCCESS_RATE", "0.3")
+        env.setdefault("AI_MAX_FAILED_AUDIT", "-1")
+    else:
+        if "AI_BATCH_N" not in env:
+            env["AI_BATCH_N"] = os.getenv("AI_BATCH_DEFAULT_N", "20")
+        env.setdefault("AI_DIAGNOSTIC_MODE", "1")
+        env.setdefault("AI_MIN_MARK", "0")
+        env.setdefault("AI_MIN_SUCCESS_RATE", "0.6")
+        env.setdefault("AI_MAX_FAILED_AUDIT", "-1")
+        env.setdefault("RUN_AI_JUDGE", "0")
+
     log(
-        "Dedicated AI batch gates: "
+        "Dedicated AI batch settings: "
+        f"AI_BATCH_N={env.get('AI_BATCH_N')} | "
+        f"AI_DIAGNOSTIC_MODE={env.get('AI_DIAGNOSTIC_MODE')} | "
         f"AI_MIN_MARK={env.get('AI_MIN_MARK')} | "
-        f"AI_MIN_SUCCESS_RATE={env.get('AI_MIN_SUCCESS_RATE')}\n"
+        f"AI_MIN_SUCCESS_RATE={env.get('AI_MIN_SUCCESS_RATE')} | "
+        f"AI_MAX_FAILED_AUDIT={env.get('AI_MAX_FAILED_AUDIT')} | "
+        f"RUN_AI_JUDGE={env.get('RUN_AI_JUDGE', os.getenv('RUN_AI_JUDGE', '0'))}\n"
     )
 
     args = [
@@ -391,16 +457,16 @@ def run_backend_ai_batch_100_test() -> None:
         "tests/ai_eval/test_ai_batch_image_live.py::test_ai_image_batch_100_live",
     ]
 
-    rc = run_command(args, cwd=BACKEND_DIR, env=env, title="RUNNING BACKEND AI BATCH 100 (LIVE)")
+    rc = run_command(args, cwd=BACKEND_DIR, env=env, title=f"RUNNING BACKEND AI BATCH ({mode})")
     _log_latest_ai_image_batch_summary()
     _auto_open_ai_reports_once()
     if rc != 0:
-        RESULTS["backend_ai_batch_100"] = "FAILED"
-        log("\nBackend AI batch 100 test FAILED")
+        RESULTS["backend_ai_batch"] = "FAILED"
+        log("\nBackend AI batch test FAILED")
         sys.exit(rc)
 
-    RESULTS["backend_ai_batch_100"] = "PASSED"
-    log("\nBackend AI batch 100 test PASSED\n")
+    RESULTS["backend_ai_batch"] = f"PASSED ({mode}, N={env.get('AI_BATCH_N')}, DIAG={env.get('AI_DIAGNOSTIC_MODE')})"
+    log("\nBackend AI batch test PASSED\n")
     log(f"AI batch pytest artifacts: {report_dir}\n")
 
 
@@ -530,12 +596,18 @@ def main() -> None:
     log(f"Backend repo commit: {_try_get_git_commit(BACKEND_DIR)}")
     log(f"Frontend repo commit: {_try_get_git_commit(FRONTEND_DIR)}")
     log(f"RUN_AI_LIVE: {os.getenv('RUN_AI_LIVE', '0')}")
+    log(f"RUN_AI_BATCH_ALWAYS: {os.getenv('RUN_AI_BATCH_ALWAYS', '1')}")
     log(f"RUN_AI_BATCH_100: {os.getenv('RUN_AI_BATCH_100', '0')}")
+    log(f"RUN_AI_REGRESSION: {os.getenv('RUN_AI_REGRESSION', '0')}")
     log(f"RUN_AI_LEGACY_EVAL: {os.getenv('RUN_AI_LEGACY_EVAL', '0')}")
     log(f"RUN_AI_JUDGE: {os.getenv('RUN_AI_JUDGE', '0')}")
     log(f"AI_BATCH_N: {os.getenv('AI_BATCH_N', '100')}")
+    log(f"AI_BATCH_DEFAULT_N: {os.getenv('AI_BATCH_DEFAULT_N', '20')}")
     log(f"AI_MIN_MARK: {os.getenv('AI_MIN_MARK', '0')}")
     log(f"AI_MIN_SUCCESS_RATE: {os.getenv('AI_MIN_SUCCESS_RATE', '0.3')}")
+    log(f"AI_DIAGNOSTIC_MODE: {os.getenv('AI_DIAGNOSTIC_MODE', '0')}")
+    log(f"AI_MAX_FAILED_AUDIT: {os.getenv('AI_MAX_FAILED_AUDIT', '-1')}")
+    log(f"AI_AUDIT_REQUIRE_GROUNDED_FEEDBACK: {os.getenv('AI_AUDIT_REQUIRE_GROUNDED_FEEDBACK', '1')}")
     log(f"FRONTEND_API_BASE_URL: {os.getenv('FRONTEND_API_BASE_URL', 'http://10.0.2.2:8000')}")
     log(f"ANDROID_EMULATOR_ID: {os.getenv('ANDROID_EMULATOR_ID', 'Medium_Phone_API_36.0')}")
     log(f"ANDROID_DEVICE_ID: {os.getenv('ANDROID_DEVICE_ID', 'emulator-5554')}")
@@ -545,7 +617,7 @@ def main() -> None:
 
     # Run tests (these sys.exit on failure)
     run_backend_tests()
-    run_backend_ai_batch_100_test()
+    run_backend_ai_batch_test()
     run_frontend_tests()
 
     ended = datetime.now()
@@ -555,10 +627,11 @@ def main() -> None:
     log(" RUN SUMMARY")
     log("===============================")
     log(f"- Backend: {RESULTS['backend']}")
-    log(f"- Backend AI Batch 100 (Live): {RESULTS['backend_ai_batch_100']}")
+    log(f"- Backend AI Batch (Live): {RESULTS['backend_ai_batch']}")
     log(f"- Frontend unit/widget: {RESULTS['frontend_unit']}")
     log(f"- Frontend integration: {RESULTS['frontend_integration']}")
     log(f"- AI Live Enabled: {os.getenv('RUN_AI_LIVE') == '1'}")
+    log(f"- AI Batch Always Enabled: {os.getenv('RUN_AI_BATCH_ALWAYS', '1') == '1'}")
     log(f"- AI Batch 100 Enabled: {os.getenv('RUN_AI_BATCH_100') == '1'}")
     log(f"- AI Legacy Eval Enabled: {os.getenv('RUN_AI_LEGACY_EVAL') == '1'}")
     log(f"- AI Judge Enabled: {os.getenv('RUN_AI_JUDGE') == '1'}")
@@ -570,7 +643,7 @@ def main() -> None:
     all_ok = (
         RESULTS["backend"] == "PASSED"
         and RESULTS["frontend_unit"] == "PASSED"
-        and (RESULTS["backend_ai_batch_100"] == "PASSED" or str(RESULTS["backend_ai_batch_100"]).startswith("SKIPPED"))
+        and (str(RESULTS["backend_ai_batch"]).startswith("PASSED") or str(RESULTS["backend_ai_batch"]).startswith("SKIPPED"))
         and (RESULTS["frontend_integration"] == "PASSED" or str(RESULTS["frontend_integration"]).startswith("SKIPPED"))
     )
 
