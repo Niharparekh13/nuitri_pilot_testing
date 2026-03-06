@@ -20,11 +20,11 @@ Install these first:
 3. Flutter SDK (stable channel)
 4. Git
 5. Docker Desktop (optional, only if you want Mongo integration tests)
+6. Android Emulator (AVD) available to Flutter (`emulator-5554`)
 
-Windows note:
+Mobile note:
 
-- For Flutter integration tests, enable Developer Mode to avoid symlink issues:
-  - `start ms-settings:developers`
+- Frontend integration tests are executed on Android emulator (not Windows desktop).
 
 ## 3) Python and Flutter Dependencies
 
@@ -80,8 +80,31 @@ python run_tests.py
 Default behavior:
 
 - Backend: runs non-live tests (`-m not ai_live`)
-- Frontend: unit/widget tests + integration tests (if folder exists)
+- Frontend: unit/widget tests + integration tests on Android emulator (if folder exists)
 - Live AI tests: not included unless enabled
+
+### Always run backend + emulator together (mobile app workflow)
+
+Use two terminals so backend stays running while app is launched on emulator.
+
+Terminal 1 (backend API):
+
+```powershell
+cd C:\Users\nihar\Desktop\nuitripilot\nuitri_pilot_backend
+uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Terminal 2 (frontend on Android emulator):
+
+```powershell
+cd C:\Users\nihar\Desktop\nuitripilot\nuitri_pilot_frontend
+.\scripts\run_android_emulator.ps1 -ApiBaseUrl "http://10.0.2.2:8000"
+```
+
+Notes:
+
+- `10.0.2.2` is required for Android emulator to reach host backend.
+- Keep Terminal 1 running while using the mobile app in emulator.
 
 ## 6) Live AI Test Modes (Important)
 
@@ -105,8 +128,17 @@ Current defaults inside `run_tests.py` live mode:
 $env:RUN_AI_LIVE="0"
 $env:RUN_AI_JUDGE="0"
 $env:RUN_AI_BATCH_100="1"
+$env:FRONTEND_API_BASE_URL="http://10.0.2.2:8000"
+$env:ANDROID_EMULATOR_ID="Medium_Phone_API_36.0"
+$env:ANDROID_DEVICE_ID="emulator-5554"
 python run_tests.py
 ```
+
+What this run includes:
+
+- Backend dedicated 100-case live AI batch (`test_ai_image_batch_100_live`)
+- Frontend integration tests on Android emulator (`emulator-5554`)
+- No Windows desktop integration target
 
 ### C) Include legacy AI eval file (not recommended by default)
 
@@ -178,8 +210,30 @@ From `nuitri_pilot_frontend`:
 flutter test
 flutter test test\widget_test.dart
 flutter test test\navigation_test.dart
-flutter test integration_test -d windows
-flutter test integration_test\app_e2e_test.dart -d windows
+flutter test integration_test -d emulator-5554
+flutter test integration_test\app_e2e_test.dart -d emulator-5554
+```
+
+Recommended emulator runner:
+
+```powershell
+.\scripts\test_android_emulator.ps1
+```
+
+Run app on emulator (non-test/manual run):
+
+```powershell
+.\scripts\run_android_emulator.ps1 -ApiBaseUrl "http://10.0.2.2:8000"
+```
+
+Useful emulator env overrides for orchestrator:
+
+```powershell
+$env:FRONTEND_API_BASE_URL="http://10.0.2.2:8000"
+$env:ANDROID_EMULATOR_ID="Medium_Phone_API_36.0"
+$env:ANDROID_DEVICE_ID="emulator-5554"
+$env:PRELOAD_BACKEND_IMAGES="1"   # set to 0 to skip image preload
+python run_tests.py
 ```
 
 ## 10) Test Artifacts (What to Present)

@@ -12,5 +12,7 @@ cd C:\Users\nihar\Desktop\nuitripilot\nuitri_pilot_testing
 python run_tests.py
 ```
 
+Frontend integration tests are run against Android emulator (`emulator-5554`), not Windows desktop.
+
 ## Optional workspace override
 Set `NUTRIPILOT_WORKSPACE_ROOT` if frontend/backend are not sibling folders.

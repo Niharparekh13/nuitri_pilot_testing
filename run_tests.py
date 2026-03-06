@@ -12,6 +12,12 @@ from dotenv import dotenv_values  # pip install python-dotenv
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = Path(os.getenv("NUTRIPILOT_WORKSPACE_ROOT", SCRIPT_DIR.parent)).resolve()
 BACKEND_DIR = WORKSPACE_ROOT / "nuitri_pilot_backend"
@@ -35,6 +41,10 @@ def log(msg: str) -> None:
     print(msg)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _try_get_git_commit(repo_dir: Path) -> str:
@@ -214,8 +224,12 @@ def run_command(cmd: list[str], cwd: Path, env: dict, title: str) -> int:
 
     assert p.stdout is not None
     for line in p.stdout:
-        # stream to console
-        print(line, end="")
+        # stream to console (encoding-safe)
+        safe_line = line
+        out_encoding = getattr(sys.stdout, "encoding", None)
+        if out_encoding:
+            safe_line = line.encode(out_encoding, errors="replace").decode(out_encoding, errors="replace")
+        print(safe_line, end="")
         # stream to file
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
@@ -426,18 +440,66 @@ def run_frontend_tests() -> None:
     # integration tests if folder exists
     it_dir = FRONTEND_DIR / "integration_test"
     if it_dir.exists():
-        log("\nRUNNING FRONTEND INTEGRATION TESTS (Windows)\n")
-        rc = run_command(
-            [flutter_cmd, "test", "integration_test", "-d", "windows"],
-            cwd=FRONTEND_DIR,
-            env=env,
-            title="FRONTEND: flutter test integration_test -d windows",
-        )
+        log("\nRUNNING FRONTEND INTEGRATION TESTS (Android emulator)\n")
+
+        api_base_url = os.getenv("FRONTEND_API_BASE_URL", "http://10.0.2.2:8000")
+        emulator_id = os.getenv("ANDROID_EMULATOR_ID", "Medium_Phone_API_36.0")
+        device_id = os.getenv("ANDROID_DEVICE_ID", "emulator-5554")
+        preload_images = _env_truthy("PRELOAD_BACKEND_IMAGES", "1")
+
+        if device_id.strip().lower() == "windows":
+            RESULTS["frontend_integration"] = "FAILED"
+            log("ERROR: ANDROID_DEVICE_ID is set to 'windows'.")
+            log("This test runner is mobile/emulator-first. Use an Android emulator device id (e.g. emulator-5554).")
+            sys.exit(2)
+
+        emulator_test_script = FRONTEND_DIR / "scripts" / "test_android_emulator.ps1"
+        if os.name == "nt" and emulator_test_script.exists():
+            preload_flag = "1" if preload_images else "0"
+            rc = run_command(
+                [
+                    "powershell",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(emulator_test_script),
+                    "-ApiBaseUrl",
+                    api_base_url,
+                    "-EmulatorId",
+                    emulator_id,
+                    "-DeviceId",
+                    device_id,
+                    "-PreloadBackendImages",
+                    preload_flag,
+                    "-RunUnitTests",
+                    "0",
+                    "-RunIntegrationTests",
+                    "1",
+                ],
+                cwd=FRONTEND_DIR,
+                env=env,
+                title="FRONTEND: Android emulator integration via scripts/test_android_emulator.ps1",
+            )
+        else:
+            # Fallback path if script is missing or on non-Windows host.
+            rc = run_command(
+                [
+                    flutter_cmd,
+                    "test",
+                    "integration_test",
+                    "-d",
+                    device_id,
+                    f"--dart-define=API_BASE_URL={api_base_url}",
+                ],
+                cwd=FRONTEND_DIR,
+                env=env,
+                title=f"FRONTEND: flutter test integration_test -d {device_id}",
+            )
+
         if rc != 0:
             RESULTS["frontend_integration"] = "FAILED"
             log("\nFrontend integration tests FAILED")
-            log("If you see a symlink error, enable Developer Mode:")
-            log("  start ms-settings:developers")
+            log("Expected target: Android emulator (not Windows desktop).")
             sys.exit(rc)
 
         RESULTS["frontend_integration"] = "PASSED"
@@ -474,6 +536,10 @@ def main() -> None:
     log(f"AI_BATCH_N: {os.getenv('AI_BATCH_N', '100')}")
     log(f"AI_MIN_MARK: {os.getenv('AI_MIN_MARK', '0')}")
     log(f"AI_MIN_SUCCESS_RATE: {os.getenv('AI_MIN_SUCCESS_RATE', '0.3')}")
+    log(f"FRONTEND_API_BASE_URL: {os.getenv('FRONTEND_API_BASE_URL', 'http://10.0.2.2:8000')}")
+    log(f"ANDROID_EMULATOR_ID: {os.getenv('ANDROID_EMULATOR_ID', 'Medium_Phone_API_36.0')}")
+    log(f"ANDROID_DEVICE_ID: {os.getenv('ANDROID_DEVICE_ID', 'emulator-5554')}")
+    log(f"PRELOAD_BACKEND_IMAGES: {os.getenv('PRELOAD_BACKEND_IMAGES', '1')}")
     log(f"AUTO_OPEN_AI_REPORTS: {os.getenv('AUTO_OPEN_AI_REPORTS', '1')}")
     log("-------------------\n")
 
